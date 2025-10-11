@@ -4,31 +4,8 @@
 import argparse
 
 import torch
-from transformers import AutoModel, AutoTokenizer
-from model.modeling_dream import DreamModel
-import types
-
-
-def decode_batch_outputs(tokenizer, inputs, outputs, eos_token: str):
-    """
-    Slice generated sequences by each prompt length (sum of attention_mask),
-    then decode to text for each sample.
-    """
-    attn = inputs["attention_mask"]
-    prompt_lens = attn.sum(dim=1).tolist()
-
-    texts = []
-    for i, p_len in enumerate(prompt_lens):
-        seq = outputs.sequences[i]
-        gen_ids = seq[p_len:]  # strip the prompt tokens
-        text = tokenizer.decode(gen_ids, skip_special_tokens=False)
-        # truncate at eos if present
-        if eos_token and eos_token in text:
-            text = text.split(eos_token)[0]
-        # also strip any trailing special tokens residue
-        text = text.replace(tokenizer.eos_token or "", "").strip()
-        texts.append(text)
-    return texts
+from utils.sampling_params import SamplingParams
+from llm import LLM
 
 
 def main():
@@ -49,18 +26,19 @@ def main():
     args = parser.parse_args()
 
     print(f"[Init] model={args.model} device={args.device}")
-    print(f"[Gen ] steps={args.steps} max_new_tokens={args.max_new_tokens} temp={args.temperature} "
-          f"top_p={args.top_p} top_k={args.top_k} alg={args.alg} alg_temp={args.alg_temp}")
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
-    
-    model = DreamModel.from_pretrained(args.model, torch_dtype=torch.bfloat16, trust_remote_code=True)
-    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
-    model = model.to(args.device).eval()
+    sampling_params = SamplingParams(
+        steps=args.steps,
+        max_new_tokens=args.max_new_tokens,
+        temperature=args.temperature,
+        top_p=args.top_p,
+        top_k=args.top_k,
+        alg=args.alg,
+        alg_temp=args.alg_temp,
+    )
+    print(f"[Init] sampling params: {sampling_params}")
 
-    from model.generation_utils_block import DreamGenerationMixin
-    model.diffusion_generate = types.MethodType(DreamGenerationMixin.diffusion_generate, model)
-    model._sample = types.MethodType(DreamGenerationMixin._sample, model)
+    llm = LLM(args.model, args.device, sampling_params)
 
     prompts = [
         "List all primes under 100.",
@@ -68,45 +46,11 @@ def main():
     ]
 
     chats = [[{"role": "user", "content": p}] for p in prompts]
-    
-    print(f"chats: {chats}")
 
-    inputs = tokenizer.apply_chat_template(
-            chats,
-            return_tensors="pt",
-            return_dict=True,
-            add_generation_prompt=True,
-            padding=True,
-            truncation=True,
-            max_length=args.context_max_length,
-        )
-    
-    print(f"inputs: {inputs}")
-    input_ids = inputs["input_ids"].to(args.device)
-    attention_mask = inputs["attention_mask"].to(args.device)
-
-    out = model.diffusion_generate(
-        input_ids,
-        attention_mask=attention_mask,
-        max_new_tokens=args.max_new_tokens,
-        output_history=False,
-        return_dict_in_generate=True,
-        steps=args.steps,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        top_k=args.top_k,
-        alg=args.alg,
-        alg_temp=args.alg_temp,
-    )
+    out = llm.generate(chats, context_max_length=args.context_max_length)
         
-    print(f"output: {out}")
-
-    # Decode per-sample
-    replies = decode_batch_outputs(tokenizer, inputs, out, eos_token=tokenizer.eos_token)
-
-    # Append assistant replies & print nicely
     print()
-    for i, r in enumerate(replies):
+    for i, r in enumerate(out):
         print(f"[S{i}] {r}\n")
     print("-" * 80 + "\n")
 
