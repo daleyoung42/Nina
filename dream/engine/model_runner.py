@@ -28,10 +28,6 @@ class ModelRunner:
         self.model = DreamModel.from_pretrained(model, trust_remote_code=True)
         self.model = self.model.to(device).eval()
 
-        from model.generation_utils_block import DreamGenerationMixin
-        self.model.diffusion_generate = types.MethodType(DreamGenerationMixin.diffusion_generate, self.model)
-        self.model._sample = types.MethodType(DreamGenerationMixin._sample, self.model)
-
         self.sampler = Sampler(device, config, sampling_params).to(device)
 
     @torch.inference_mode()
