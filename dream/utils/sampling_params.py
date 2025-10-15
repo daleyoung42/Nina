@@ -7,6 +7,10 @@ class SamplingParams:
     temperature: float = 0.0
     top_p: float = None
     top_k: int = None
-    alg: str = "entropy" # choices=["origin", "maskgit_plus", "topk_margin", "entropy"]
+    margin_confidence: bool = False
+    neg_entropy: bool = False
+    alg: str = "entropy" # choices=["origin", "confidence_threshold", "entropy"]
     alg_temp: float = 0.1
+    eps: float = 1e-3
+    threshold: float = 0.9
     
