@@ -7,6 +7,7 @@ from utils.sequence import Sequence, SequenceStatus
 
 class Scheduler:
     def __init__(self, config: Config, eos):
+        self.config = config
         self.max_num_batched_tokens = config.max_num_batched_tokens
         self.max_num_seqs = config.max_num_seqs
         self.eos = eos
@@ -21,6 +22,7 @@ class Scheduler:
         self.waiting.append(seq)
 
     def schedule(self) -> tuple[list[Sequence], bool]:
+        ## TODO: the current schedule policy should ensure every sequence in the batch is processing the same block
         # Prefill
         scheduled_seqs = []
         num_seqs = 0
@@ -38,15 +40,26 @@ class Scheduler:
             return scheduled_seqs, True
         
         # Decode
-        # TODO: there is no decode stage as the scheduled seqs will always be finished for now
+        while self.running and num_seqs < self.max_num_seqs:
+            seq = self.running.popleft()
+            scheduled_seqs.append(seq)
+            num_seqs += 1
+
+        assert scheduled_seqs, "No sequences scheduled!"
+        self.running.extendleft(reversed(scheduled_seqs))
 
         return scheduled_seqs, False
     
     def postprocess(self, seqs: list[Sequence], token_ids: list[int]) -> list[bool]:
-        length = len(seqs)
-        for seq in seqs:
-            # print(f"Mark seq_id={seq.seq_id} as finished")
-            seq.status = SequenceStatus.FINISHED
-            self.running.remove(seq)
+        finished_flags = []
+        for seq, token_id in zip(seqs, token_ids):
+            seq.token_ids = token_id
+            seq.current_block += 1
+            if seq.current_block >= (self.config.max_new_tokens // self.config.block_length):
+                finished_flags.append(True)
+                seq.status = SequenceStatus.FINISHED
+                self.running.remove(seq)
+            else:
+                finished_flags.append(False)
 
-        return [True for _ in range(length)]
+        return finished_flags

@@ -15,6 +15,16 @@ class Sampler(nn.Module):
         self.config = config
         self.sampling_params = sampling_params
 
+        gen_length = self.config.max_new_tokens
+        self.block_length = self.config.block_length
+        steps = self.config.steps
+        assert gen_length % self.block_length == 0, f"gen_length ({gen_length}) must be divisible by block_length ({self.block_length})"
+        num_blocks = gen_length // self.block_length
+        assert steps % num_blocks == 0, f"steps ({steps}) must be divisible by num_blocks ({num_blocks})"
+        self.steps_per_block = steps // num_blocks
+
+        self.timesteps = torch.linspace(1, self.sampling_params.eps, self.steps_per_block + 1, device=device)
+
     def top_p_logits(self, logits, top_p=None):
         sorted_logits, sorted_indices = torch.sort(logits, descending=True)
         cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
@@ -75,8 +85,8 @@ class Sampler(nn.Module):
         
         return confidence, x0
 
-    def forward(self, i, x, logits, mask_index, current_block_start, block_length, steps_per_block, timesteps, dual_cache=False):
-        current_block_end = current_block_start + block_length
+    def forward(self, i, x, logits, mask_index, current_block_start, dual_cache=False):
+        current_block_end = current_block_start + self.block_length
         mask_token_id = self.config.mask_token_id
         if self.sampling_params.alg == 'confidence_threshold':
             mask_logits = logits[mask_index]
@@ -92,7 +102,7 @@ class Sampler(nn.Module):
             
             x_[mask_index] = x0.clone()
             full_confidence[mask_index] = confidence
-            full_confidence[:, block_length:] = -torch.inf
+            full_confidence[:, self.block_length:] = -torch.inf
             
             current_transfer_tokens = (x[:, current_block_start:current_block_end] == mask_token_id).sum()
             
@@ -109,21 +119,21 @@ class Sampler(nn.Module):
             else:
                 x[:, current_block_start:][transfer_index] = x_[transfer_index]
         else:
-            if i == steps_per_block:
+            if i == self.steps_per_block:
                 return x
-            t = timesteps[i]
-            s = timesteps[i + 1]
-            mask_index[:, block_length:] = False
+            t = self.timesteps[i]
+            s = self.timesteps[i + 1]
+            mask_index[:, self.block_length:] = False
             mask_logits = logits[mask_index]
             confidence, x0 = self.sample_tokens(mask_logits, neg_entropy=True)
             num_mask_token = mask_index.sum() / mask_index.shape[0]
-            number_transfer_tokens = int(num_mask_token * (1 - s / t)) if i < steps_per_block - 1 else int(num_mask_token)
+            number_transfer_tokens = int(num_mask_token * (1 - s / t)) if i < self.steps_per_block - 1 else int(num_mask_token)
             if dual_cache:
                 full_confidence = torch.full_like(x[:, current_block_start:current_block_end], -torch.inf, device=self.device, dtype=logits.dtype)
             else:
                 full_confidence = torch.full_like(x[:, current_block_start:], -torch.inf, device=self.device, dtype=logits.dtype)
             full_confidence[mask_index] = confidence
-            full_confidence[:, block_length:] = -torch.inf
+            full_confidence[:, self.block_length:] = -torch.inf
             
             if number_transfer_tokens > 0:
                 alg_temp = self.sampling_params.alg_temp

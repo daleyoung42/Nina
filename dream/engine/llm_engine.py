@@ -40,7 +40,7 @@ class LLMEngine:
         input_ids = inputs["input_ids"].squeeze(0).to(self.device)
         attention_mask = inputs["attention_mask"].squeeze(0).to(self.device)
 
-        seq = Sequence(token_ids=input_ids, attention_mask=attention_mask)
+        seq = Sequence(token_ids=input_ids, attention_mask=attention_mask, max_length=self.config.max_new_tokens, mask_token_id=self.config.mask_token_id)
         # print(f"[LLM] New request: seq_id={seq.seq_id} num_tokens={seq.num_tokens}, input_ids={input_ids}, attention_mask={attention_mask}")
         self.scheduler.add(seq)
         return seq
@@ -57,7 +57,7 @@ class LLMEngine:
         # for seq, finished in zip(scheduled_seqs, finished_flags):
             # print(f"[LLM] Finished seq_id={seq.seq_id} finished={finished}")
 
-        outputs = outputs.sequences if outputs is not None else []
+        outputs = outputs if outputs is not None else []
         return scheduled_seqs, outputs, finished_flags
 
     def generate(self, chats, context_max_length=None):
