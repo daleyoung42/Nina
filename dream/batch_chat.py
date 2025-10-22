@@ -2,16 +2,19 @@
 # -*- coding: utf-8 -*-
 
 import argparse
+import time
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 import torch
 from utils.sampling_params import SamplingParams
 from llm import LLM
-
+from transformers import AutoTokenizer
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, default="Dream-org/Dream-v0-Instruct-7B")
-    # parser.add_argument("--batch-size", type=int, default=2)
+    # parser.add_argument("--model", type=str, default="/disk1/models/hub/Dream-v0-Instruct-7B")
+    parser.add_argument("--model", type=str, default="/disk1/models/hub/Fast_dLLM_v2_7B")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--steps", type=int, default=128, help="diffusion timesteps")
     parser.add_argument("--max-new-tokens", type=int, default=128)
@@ -41,18 +44,44 @@ def main():
     llm = LLM(args.model, args.device, sampling_params)
 
     prompts = [
-        "List all primes under 100.",
-        "List all primes under 100.",
-    ]
-
+        "List all primes under 100."
+    ] * 2
     chats = [[{"role": "user", "content": p}] for p in prompts]
 
+    # 计时开始
+    t0 = time.perf_counter()
     out = llm.generate(chats, context_max_length=args.context_max_length)
-        
+    elapsed = time.perf_counter() - t0
+
     print()
     for i, r in enumerate(out):
         print(f"[S{i}] {r}\n")
     print("-" * 80 + "\n")
+
+    # 统计 out 的新生成 token 数
+    def count_tokens(texts):
+        total = 0
+        tok = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+        for s in texts:
+            if tok is not None:
+                try:
+                    # 优先使用 encode 接口
+                    total += len(tok.encode(s))
+                except Exception:
+                    try:
+                        # 兼容 tokenizer(s).input_ids 风格
+                        total += len(tok(s).input_ids)
+                    except Exception:
+                        # 最后退化为按空格切分的近似
+                        total += len(s.split())
+            else:
+                total += len(s.split())
+        return total
+
+    new_tokens = count_tokens(out)
+    tps = new_tokens / elapsed if elapsed > 0 else float("inf")
+
+    print(f"tokens={new_tokens} elapsed={elapsed:.3f}s tps={tps:.2f}")
 
 if __name__ == "__main__":
     main()

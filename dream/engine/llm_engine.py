@@ -61,6 +61,23 @@ class LLMEngine:
         return scheduled_seqs, outputs, finished_flags
 
     def generate(self, chats, context_max_length=None):
+        if "v2" in self.model:
+            chats = self.tokenizer.apply_chat_template(
+                chats,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+            model_inputs = self.tokenizer(chats, return_tensors="pt").to(self.device)
+            generated_ids = self.model_runner.model.generate(
+                model_inputs["input_ids"],
+                tokenizer=self.tokenizer,
+                block_size=32,
+                max_new_tokens=128,
+                small_block_size=8,
+                threshold=0.9,
+            )
+            response = [self.tokenizer.decode(generated_id[model_inputs["input_ids"].shape[1]:], skip_special_tokens=True) for generated_id in generated_ids]
+            return response
         for chat in chats:
             self.add_request(chat, context_max_length=context_max_length)
 

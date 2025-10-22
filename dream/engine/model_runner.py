@@ -7,6 +7,7 @@ from config import Config
 from utils.sampling_params import SamplingParams
 from utils.sequence import Sequence
 from model.modeling_dream import DreamModel
+from model.modeling_fast_dllm_v2 import Fast_dLLM_QwenForCausalLM
 from model.sampler import Sampler
 
 class ModelRunner:
@@ -15,8 +16,10 @@ class ModelRunner:
         self.device = device
         # Sampler as a part of the model
         self.sampling_params = sampling_params
-
-        self.model = DreamModel.from_pretrained(model, trust_remote_code=True)
+        if "v2" not in model:
+            self.model = DreamModel.from_pretrained(model, trust_remote_code=True)
+        else:
+            self.model = Fast_dLLM_QwenForCausalLM.from_pretrained(model, trust_remote_code=True)
         self.model = self.model.to(device).eval()
 
         self.sampler = Sampler(device, config, sampling_params).to(device)
