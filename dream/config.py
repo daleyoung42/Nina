@@ -6,7 +6,7 @@ class Config:
     model_name: str = "v2"
     max_num_batched_tokens: int = 16384
     max_num_seqs: int = 512
-    block_length: int = 128
+    block_length: int = 32
     steps: int = 128
     max_new_tokens: int = 128
     output_history: bool = True
