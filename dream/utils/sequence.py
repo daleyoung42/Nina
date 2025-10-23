@@ -11,7 +11,7 @@ class SequenceStatus(Enum):
 class Sequence:
     counter = count()
 
-    def __init__(self, token_ids, attention_mask, max_length, mask_token_id):
+    def __init__(self, token_ids, attention_mask, max_length, mask_token_id, need_pad=True):
         self.seq_id = next(Sequence.counter)
         
         self.token_ids = copy(token_ids)
@@ -28,8 +28,8 @@ class Sequence:
         self.num_tokens = len(token_ids)
 
         # post init for some data
-        self.token_ids = F.pad(self.token_ids, (0, self.max_length), value=self.mask_token_id)
-        
+        if need_pad:
+            self.token_ids = F.pad(self.token_ids, (0, self.max_length), value=self.mask_token_id)
 
     def __len__(self):
         return self.num_tokens

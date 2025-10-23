@@ -758,9 +758,9 @@ class Fast_dLLM_QwenForCausalLM(Fast_dLLM_QwenPreTrainedModel, GenerationMixin):
             p_1t = torch.softmax(logits, dim=-1)
             x_1 = p_1t.argmax(dim=-1)
             return x_1, p_1t
-                            
+        # Compute softmax probabilities                    
         probs = F.softmax(scaled_logits, dim=-1)
-
+        # Sort the probabilities to perform top-p filtering
         sorted_probs, sorted_indices = torch.sort(probs, descending=True)
         cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
 

@@ -44,10 +44,12 @@ def main():
     llm = LLM(args.model, args.device, sampling_params)
 
     prompts = [
-        "List all primes under 100."
-    ] * 2
+        "List all primes under 100.",
+        "Explain the theory of relativity in simple"
+    ]
     chats = [[{"role": "user", "content": p}] for p in prompts]
-
+    # print(f"[Test] Warming up models...")
+    # out = llm.generate(chats, context_max_length=args.context_max_length)
     # 计时开始
     t0 = time.perf_counter()
     out = llm.generate(chats, context_max_length=args.context_max_length)

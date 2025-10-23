@@ -38,7 +38,8 @@ class Scheduler:
             num_seqs += 1
         if scheduled_seqs:
             return scheduled_seqs, True
-        
+        # if "v2" in self.config.model_name:
+        #     return scheduled_seqs, True
         # Decode
         while self.running and num_seqs < self.max_num_seqs:
             seq = self.running.popleft()
@@ -49,7 +50,7 @@ class Scheduler:
         self.running.extendleft(reversed(scheduled_seqs))
 
         return scheduled_seqs, False
-    
+
     def postprocess(self, seqs: list[Sequence], token_ids: list[int]) -> list[bool]:
         finished_flags = []
         for seq, token_id in zip(seqs, token_ids):
