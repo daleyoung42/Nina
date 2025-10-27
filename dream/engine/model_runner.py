@@ -132,10 +132,11 @@ class ModelRunner:
 
         return x
     
+    # block-grained
     @torch.inference_mode()
     def run_model_v2(self, input_ids):    
-        block_length = 32
-        block_size = 32
+        block_length = self.config.block_length
+        block_size = block_length
         num_blocks = self.config.max_new_tokens // block_length
         small_block_size = self.config.small_block_size
         stop_token = self.config.stop_token
@@ -214,13 +215,124 @@ class ModelRunner:
             input_ids = input_ids[:, :stop_token_idx+original_input_length+1]
         return input_ids
     
+    def check_small_block_idx(self, x_t, block_size, small_block_size, mask_id):
+            """
+            在 x_t 的最后一个 block（长度 block_size）里，返回最左边仍含有 mask_id 的 small block 的索引。
+            批量情况下：只要 batch 中任意样本在该 small block 有 mask，就选择该 small block。
+            若整个最后一个 block 都没有 mask，返回 -1。
+            依赖外层的 mask_id 变量。
+            """
+            tail = x_t[:, -block_size:]                     # [B, block_size]
+            mask_idx = (tail == mask_id)                    # [B, block_size], bool
+            if not mask_idx.any():
+                return -1
+
+            # 常规：要求能被整除；若不能整除也做兜底处理
+            full = block_size // small_block_size
+            rem = block_size % small_block_size
+
+            for i in range(full):
+                s = i * small_block_size
+                e = s + small_block_size
+                if mask_idx[:, s:e].any():
+                    return i
+
+            return -1
+    
+    # sampling-step grained
+    @torch.inference_mode()
+    def run_model_v3(self, input_ids):    
+        block_length = self.config.block_length
+        block_size = block_length
+        num_blocks = self.config.max_new_tokens // block_length
+        small_block_size = self.config.small_block_size
+        stop_token = self.config.stop_token
+        mask_id = self.config.mask_token_id
+        use_block_cache = self.config.use_block_cache
+        original_input_length = input_ids.shape[1]
+        top_p = self.config.top_p
+        temperature = self.config.temperature
+        threshold = self.config.threshold
+        # print(f"block size: {block_size}, num_blocks: {num_blocks}, small_block_size: {small_block_size}")
+        # Prefill & Get past_key_values
+        if input_ids.shape[1] > block_size:
+            output = self.model.forward(input_ids=input_ids[:, :(input_ids.shape[1] // block_size * block_size)], use_cache=True, update_past_key_values=True, block_size=block_size)
+            logits, past_key_values = output.logits, output.past_key_values
+            if input_ids.shape[1] % block_size == 0:
+                mask_idx = (input_ids[:, -block_size:] == mask_id)
+                if mask_idx.sum() == 0:
+                    next_token = logits[:, -1:, :].argmax(dim=-1)
+                    input_ids = torch.cat([input_ids, next_token], dim=1)
+        else:
+            past_key_values = None
+
+        if stop_token in input_ids[:, original_input_length:]:
+            return input_ids
+        
+        prompt_length = input_ids.shape[1]
+        # Initialize x_init with mask_id
+        if prompt_length % block_size != 0:
+            x_init = mask_id * torch.ones((input_ids.shape[0], block_size-prompt_length % block_size), device=self.device, dtype=torch.long)
+            x_init = torch.cat([input_ids, x_init], dim=1)
+            x_t = x_init.clone()
+        else:
+            x_t = input_ids.clone()
+        block_past_key_values = None
+        if stop_token in x_t[:, prompt_length:]:
+            stop_token_idx = (x_t[:, prompt_length:] == stop_token).nonzero()[0][1]
+            if (x_t[:, prompt_length:prompt_length+stop_token_idx] == mask_id).sum() == 0:
+                return x_t
+            
+        small_block_idx = self.check_small_block_idx(x_t, block_size, small_block_size, mask_id)
+        print(f"small block idx to decode: {small_block_idx}")
+        assert small_block_idx != -1, "No small block to decode!"
+        # decode small blocks step by step
+        small_block_start_idx = small_block_idx * small_block_size
+        small_block_end_idx = small_block_start_idx + small_block_size
+        start = -block_size + small_block_start_idx
+        end = None if block_size == small_block_end_idx else -block_size + small_block_end_idx
+        while True:
+            mask_idx = (x_t[:, -block_size:] == mask_id)
+            if mask_idx[:, start:end].sum() == 0:
+                break
+            if stop_token in x_t[:, prompt_length:]:
+                stop_token_idx = (x_t[:, prompt_length:] == stop_token).nonzero()[0][1]
+                if (x_t[:, prompt_length:prompt_length+stop_token_idx] == mask_id).sum() == 0:
+                    break
+            if use_block_cache:
+                if block_past_key_values is None or (x_t[:, -block_size+small_block_start_idx] == mask_id).any():
+                    output = self.model.forward(input_ids=x_t[:, -block_size:], use_cache=True, past_key_values=past_key_values, update_past_key_values=False, use_block_cache=True)
+                    logits, block_past_key_values = output.logits, output.block_past_key_values
+                    logits = torch.cat([logits[:, :1, :], logits[:, :-1, :]], dim=1)
+                    logits = logits[:, start:end]
+                else:
+                    logits = self.model.forward(input_ids=x_t[:,start:end], use_cache=True, past_key_values=past_key_values, update_past_key_values=False, use_block_cache=True, block_past_key_values=block_past_key_values, replace_position=small_block_start_idx).logits
+                    logits = torch.cat([logits[:, :1, :], logits[:, :-1, :]], dim=1)
+            else:
+                logits = self.model.forward(input_ids=x_t[:, -block_size:], use_cache=True, past_key_values=past_key_values, update_past_key_values=False).logits
+                logits = torch.cat([logits[:, :1, :], logits[:, :-1, :]], dim=1)
+                logits = logits[:, start:end]
+            x_t = self.sampler.forward(x_t, logits, top_p, temperature, threshold, mask_idx, start, end)
+        mask_idx = (x_t[:, -block_size:] == mask_id)
+        # Decode a complete block, update cache, and generate the next token
+        if mask_idx.sum() == 0:
+            output = self.model.forward(input_ids=x_t[:, -block_size:], use_cache=True, past_key_values=past_key_values, update_past_key_values=True, block_size=block_size)
+            logits, past_key_values = output.logits, output.past_key_values
+            next_token = logits[:, -1:, :].argmax(dim=-1)
+            x_t = torch.cat([x_t, next_token], dim=1)
+        input_ids = x_t
+        print(f"input ids shape {input_ids.shape}")
+        # Truncate stop_token
+        if stop_token in input_ids[:, original_input_length:]:
+            stop_token_idx = (input_ids[:, original_input_length:] == stop_token).nonzero()[0][1]
+            input_ids = input_ids[:, :stop_token_idx+original_input_length+1]
+        return input_ids
+    
     def run(self, seqs: list[Sequence], is_prefill: bool):
         # [1, 2], [2, 3] -> [[1, 2], [2, 3]]
         input_ids = torch.stack([seq.token_ids for seq in seqs], dim=0)
-        print("run")
         if "v2" in self.model_name:
-            outputs = self.run_model_v2(input_ids)
-            # print(f"outputs: {outputs}")
+            outputs = self.run_model_v3(input_ids)
             return outputs
 
         attention_mask = torch.stack([seq.attention_mask for seq in seqs], dim=0)
