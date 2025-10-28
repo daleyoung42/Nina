@@ -45,7 +45,7 @@ def main():
 
     prompts = [
         "List all primes under 100.",
-    ] * 2
+    ] * 64
     chats = [[{"role": "user", "content": p}] for p in prompts]
     # print(f"[Test] Warming up models...")
     # out = llm.generate(chats, context_max_length=args.context_max_length)

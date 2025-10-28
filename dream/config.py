@@ -8,7 +8,7 @@ class Config:
     max_num_seqs: int = 512
     block_length: int = 32
     steps: int = 128
-    max_new_tokens: int = 256
+    max_new_tokens: int = 128
     output_history: bool = True
     return_dict_in_generate: bool = True
     mask_token_id: int = 151665
