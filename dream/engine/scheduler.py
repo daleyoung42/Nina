@@ -11,7 +11,10 @@ class Scheduler:
         self.max_num_batched_tokens = config.max_num_batched_tokens
         self.max_num_seqs = config.max_num_seqs
         self.eos = eos
-
+        self.block_size = config.block_length
+        self.stop_token = config.stop_token
+        self.max_new_tokens = config.max_new_tokens
+        self.mask_id = config.mask_token_id
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
 
@@ -55,8 +58,13 @@ class Scheduler:
         finished_flags = []
         for seq, token_id in zip(seqs, token_ids):
             seq.token_ids = token_id
-            seq.current_block += 1
-            if seq.current_block >= (self.config.max_new_tokens // self.config.block_length):
+            is_finished = False
+            stop_idx = (seq.token_ids == self.stop_token).nonzero(as_tuple=True)[0]
+            if len(stop_idx) > 0 and stop_idx[0] >= seq.num_prompt_tokens:
+                is_finished = True
+            if len(seq.token_ids) > self.max_new_tokens:
+                is_finished = True
+            if is_finished:
                 finished_flags.append(True)
                 seq.status = SequenceStatus.FINISHED
                 self.running.remove(seq)
