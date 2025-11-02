@@ -24,6 +24,8 @@ from .configuration_fast_dllm_v2 import Fast_dLLM_QwenConfig
 from torch.nn.attention.flex_attention import flex_attention, create_block_mask
 from einops import rearrange, repeat
 
+from model.attentions.page_attention import PageAttention
+
 logger = logging.get_logger(__name__)
 
 
@@ -278,7 +280,7 @@ class Fast_dLLM_QwenDecoderLayer(GradientCheckpointingLayer):
         super().__init__()
         self.hidden_size = config.hidden_size
 
-        self.self_attn = Fast_dLLM_QwenAttention(config=config, layer_idx=layer_idx)
+        self.self_attn = PageAttention(config=config, layer_idx=layer_idx)
 
         self.mlp = Fast_dLLM_QwenMLP(config)
         self.input_layernorm = Fast_dLLM_QwenRMSNorm(config.hidden_size, eps=config.rms_norm_eps)

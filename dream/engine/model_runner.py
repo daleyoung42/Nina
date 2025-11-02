@@ -6,6 +6,7 @@ sys.path.append("..")
 from config import Config
 from utils.sampling_params import SamplingParams
 from utils.sequence import Sequence
+from utils.context import set_context, reset_context
 from model.modeling_dream import DreamModel
 from model.modeling_fast_dllm_v2 import Fast_dLLM_QwenForCausalLM
 from model.sampler import Sampler
@@ -76,6 +77,12 @@ class ModelRunner:
                 module.k_cache = self.kv_cache[0, layer_id]
                 module.v_cache = self.kv_cache[1, layer_id]
                 layer_id += 1
+
+    def prepare_block_tables(self, seqs: list[Sequence]):
+        max_len = max(len(seq.block_table) for seq in seqs)
+        block_tables = [seq.block_table + [-1] * (max_len - len(seq.block_table)) for seq in seqs]
+        block_tables = torch.tensor(block_tables, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+        return block_tables
 
     @torch.inference_mode()
     def run_model(self, input_ids, attention_mask, current_block_start):
@@ -402,6 +409,8 @@ class ModelRunner:
         return input_ids
 
     def run(self, seqs: list[Sequence], is_prefill: bool):
+        set_context(is_prefill, self.prepare_block_tables(seqs))
+
         # [1, 2], [2, 3] -> [[1, 2], [2, 3]]
         input_ids = torch.stack([seq.token_ids for seq in seqs], dim=0)
         if "v2" in self.model_name:
@@ -412,4 +421,5 @@ class ModelRunner:
         # print(f"input_ids: {input_ids}, attention_mask: {attention_mask}")
         current_block_start = seqs[0].num_prompt_tokens + seqs[0].current_block * self.config.block_length
         outputs = self.run_model(input_ids, attention_mask, current_block_start)
+        reset_context()
         return outputs

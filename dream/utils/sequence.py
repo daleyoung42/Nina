@@ -27,6 +27,7 @@ class Sequence:
         self.status = SequenceStatus.WAITING
         self.current_block = 0
         self.num_tokens = len(token_ids)
+        self.num_cached_tokens = 0
         self.block_table = []
 
         # post init for some data
