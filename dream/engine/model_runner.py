@@ -16,21 +16,66 @@ class ModelRunner:
     def __init__(self, model, device, config: Config, sampling_params: SamplingParams):
         self.config = config
         self.device = device
+
+        self.world_size = 1
+
         # Sampler as a part of the model
         self.sampling_params = sampling_params
         # temp for v2 debug
         self.model_name = model
         self.tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
         
+        default_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(self.config.hf_config.torch_dtype)
+        torch.set_default_device(self.device)
         if "v2" not in self.model_name:
             self.model = DreamModel.from_pretrained(model, torch_dtype=torch.bfloat16, trust_remote_code=True)
         else:
             self.model = Fast_dLLM_QwenForCausalLM.from_pretrained(model, torch_dtype=torch.bfloat16, trust_remote_code=True)
-        self.model = self.model.to(device).eval()
+        self.model = self.model.eval()
         if "v2" not in self.model_name:
             self.sampler = Sampler(device, config, sampling_params).to(device)
         else:
             self.sampler = Sampler_v2(device, config, sampling_params).to(device)
+
+        self.allocate_kv_cache()
+
+        torch.set_default_dtype(default_dtype)
+        torch.set_default_device('cpu')
+
+    
+    def allocate_kv_cache(self):
+        config = self.config
+        hf_config = config.hf_config
+        free, total = torch.cuda.mem_get_info()
+        used = total - free
+        peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
+        current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
+        num_kv_heads = hf_config.num_key_value_heads // self.world_size
+
+        if hasattr(hf_config, 'head_dim'):
+            head_dim = hf_config.head_dim
+        elif hasattr(hf_config, 'hidden_size') and hasattr(hf_config, 'num_attention_heads'):
+            head_dim = hf_config.hidden_size // hf_config.num_attention_heads
+        else:
+            raise AttributeError(f"Cannot determine head_dim from config: {type(hf_config)}")
+
+        block_bytes = 2 * hf_config.num_hidden_layers * self.config.kv_block_size * num_kv_heads * head_dim * hf_config.torch_dtype.itemsize
+        config.num_kv_blocks = int(total * config.gpu_memory_utilization - used - peak + current) // block_bytes
+        assert config.num_kv_blocks > 0
+
+        print(f"[ModelRunner] GPU memory total: {total / (1024**3):.2f} GB, used: {used / (1024**3):.2f} GB, peak: {peak / (1024**3):.2f} GB, current allocated: {current / (1024**3):.2f} GB")
+        print(f"[ModelRunner] Each kv_cache block size: {block_bytes / (1024**2):.2f} MB")
+        print(f"[ModelRunner] Allocating kv_cache with {config.num_kv_blocks} blocks, each block has size {self.config.kv_block_size}, total size: {block_bytes * config.num_kv_blocks / (1024**3):.2f} GB")
+
+        self.kv_cache = torch.empty(2, hf_config.num_hidden_layers, config.num_kv_blocks, self.config.kv_block_size, num_kv_heads, head_dim)
+        layer_id = 0
+        for module in self.model.modules():
+            # print(f"Module: {module}")
+            if hasattr(module, "k_cache") and hasattr(module, "v_cache"):
+                module.k_cache = self.kv_cache[0, layer_id]
+                module.v_cache = self.kv_cache[1, layer_id]
+                layer_id += 1
 
     @torch.inference_mode()
     def run_model(self, input_ids, attention_mask, current_block_start):
@@ -173,8 +218,10 @@ class ModelRunner:
         threshold = self.config.threshold
         # print(f"block size: {block_size}, num_blocks: {num_blocks}, small_block_size: {small_block_size}")
         # Prefill & Get past_key_values
+        print(f"input_ids shape: {input_ids.shape}")
         if input_ids.shape[1] > block_size:
             output = self.model.forward(input_ids=input_ids[:, :(input_ids.shape[1] // block_size * block_size)], use_cache=True, update_past_key_values=True, block_size=block_size)
+            print(f"forward with past_key_values, input_ids shape: {input_ids[:, :(input_ids.shape[1] // block_size * block_size)].shape}")
             logits, past_key_values = output.logits, output.past_key_values
             if input_ids.shape[1] % block_size == 0:
                 mask_idx = (input_ids[:, -block_size:] == mask_id)
@@ -214,14 +261,17 @@ class ModelRunner:
         if use_block_cache:
             if block_past_key_values is None or (x_t[:, -block_size+small_block_start_idx] == mask_id).any():
                 output = self.model.forward(input_ids=x_t[:, -block_size:], use_cache=True, past_key_values=past_key_values, update_past_key_values=False, use_block_cache=True)
+                print(f"forward with block_cache, input_ids shape: {x_t[:, -block_size:].shape}")
                 logits, block_past_key_values = output.logits, output.block_past_key_values
                 logits = torch.cat([logits[:, :1, :], logits[:, :-1, :]], dim=1)
                 logits = logits[:, start:end]
             else:
                 logits = self.model.forward(input_ids=x_t[:,start:end], use_cache=True, past_key_values=past_key_values, update_past_key_values=False, use_block_cache=True, block_past_key_values=block_past_key_values, replace_position=small_block_start_idx).logits
+                print(f"2forward with block_cache, input_ids shape: {x_t[:, start:end].shape}")
                 logits = torch.cat([logits[:, :1, :], logits[:, :-1, :]], dim=1)
         else:
             logits = self.model.forward(input_ids=x_t[:, -block_size:], use_cache=True, past_key_values=past_key_values, update_past_key_values=False).logits
+            print(f"forward without block_cache, input_ids shape: {x_t[:, -block_size:].shape}")
             logits = torch.cat([logits[:, :1, :], logits[:, :-1, :]], dim=1)
             logits = logits[:, start:end]
         x_t = self.sampler.forward(x_t, logits, top_p, temperature, threshold, mask_idx, start, end)
@@ -230,6 +280,7 @@ class ModelRunner:
         # Decode a complete block, update cache, and generate the next token
         if mask_idx.sum() == 0:
             output = self.model.forward(input_ids=x_t[:, -block_size:], use_cache=True, past_key_values=past_key_values, update_past_key_values=True, block_size=block_size)
+            print(f"2forward with past_key_values, input_ids shape: {x_t[:, -block_size:].shape}")
             logits, past_key_values = output.logits, output.past_key_values
             next_token = logits[:, -1:, :].argmax(dim=-1)
             x_t = torch.cat([x_t, next_token], dim=1)
@@ -354,7 +405,7 @@ class ModelRunner:
         # [1, 2], [2, 3] -> [[1, 2], [2, 3]]
         input_ids = torch.stack([seq.token_ids for seq in seqs], dim=0)
         if "v2" in self.model_name:
-            outputs = self.run_model_v3(input_ids)
+            outputs = self.run_model_v2(input_ids)
             return outputs
 
         attention_mask = torch.stack([seq.attention_mask for seq in seqs], dim=0)

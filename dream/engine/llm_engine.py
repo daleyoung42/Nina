@@ -52,16 +52,23 @@ class LLMEngine:
         input_ids = inputs["input_ids"].squeeze(0).to(self.device)
         attention_mask = inputs["attention_mask"].squeeze(0).to(self.device)
 
-        seq = Sequence(token_ids=input_ids, attention_mask=attention_mask, max_length=self.config.max_new_tokens, mask_token_id=self.config.mask_token_id, need_pad=need_pad)
+        seq = Sequence(
+            token_ids=input_ids,
+            attention_mask=attention_mask,
+            max_length=self.config.max_new_tokens,
+            mask_token_id=self.config.mask_token_id,
+            kv_block_size=self.config.kv_block_size,
+            need_pad=need_pad
+        )
         # print(f"[LLM] New request: seq_id={seq.seq_id} num_tokens={seq.num_tokens}, input_ids={input_ids}, attention_mask={attention_mask}")
         self.scheduler.add(seq)
         return seq
     
     def step(self):
         scheduled_seqs, is_prefill = self.scheduler.schedule()
-        # print(f"[LLM] Scheduled {len(scheduled_seqs)} sequences, is_prefill={is_prefill}")
-        # for seq in scheduled_seqs:
-            # print(f"  - seq_id={seq.seq_id} num_tokens={seq.num_tokens}")
+        print(f"[LLM] Scheduled {len(scheduled_seqs)} sequences, is_prefill={is_prefill}")
+        for seq in scheduled_seqs:
+            print(f"  - seq_id={seq.seq_id} num_tokens={seq.num_tokens}")
 
         outputs = self.model_runner.run(scheduled_seqs, is_prefill)
 

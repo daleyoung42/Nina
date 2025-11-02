@@ -1,6 +1,8 @@
 import sys
 from collections import deque
 
+from engine.block_manager import KVBlockManager
+
 sys.path.append("..")
 from config import Config
 from utils.sequence import Sequence, SequenceStatus
@@ -15,6 +17,10 @@ class Scheduler:
         self.stop_token = config.stop_token
         self.max_new_tokens = config.max_new_tokens
         self.mask_id = config.mask_token_id
+        self.kv_block_manager = KVBlockManager(
+            num_kv_blocks=config.num_kv_blocks,
+            kv_block_size=config.kv_block_size
+        )
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
 
@@ -37,6 +43,7 @@ class Scheduler:
             next_seq.status = SequenceStatus.RUNNING
             scheduled_seqs.append(self.waiting.popleft())
             self.running.append(next_seq)
+            self.kv_block_manager.allocate(next_seq)
             num_batched_tokens += next_seq.num_tokens
             num_seqs += 1
         if scheduled_seqs:
@@ -46,6 +53,7 @@ class Scheduler:
         # Decode
         while self.running and num_seqs < self.max_num_seqs:
             seq = self.running.popleft()
+            self.kv_block_manager.may_append(seq)
             scheduled_seqs.append(seq)
             num_seqs += 1
 
@@ -58,6 +66,9 @@ class Scheduler:
         finished_flags = []
         for seq, token_id in zip(seqs, token_ids):
             seq.token_ids = token_id
+            # Update num_tokens directly, could have some masked tokens at the end
+            seq.num_tokens = len(token_id)
+
             is_finished = False
             stop_idx = (seq.token_ids == self.stop_token).nonzero(as_tuple=True)[0]
             if len(stop_idx) > 0 and stop_idx[0] >= seq.num_prompt_tokens:
@@ -67,6 +78,7 @@ class Scheduler:
             if is_finished:
                 finished_flags.append(True)
                 seq.status = SequenceStatus.FINISHED
+                self.kv_block_manager.deallocate(seq)
                 self.running.remove(seq)
             else:
                 finished_flags.append(False)
